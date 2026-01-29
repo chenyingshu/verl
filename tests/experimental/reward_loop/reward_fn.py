@@ -1,4 +1,5 @@
 # Copyright 2025 Bytedance Ltd. and/or its affiliates
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +16,6 @@
 import base64
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
 import aiohttp
@@ -116,7 +116,7 @@ def _pil_image_to_base64(image: Image.Image) -> str:
 
 async def compute_score_ocr(
     data_source: str,
-    solution_str: Image.Image | np.ndarray | torch.Tensor,
+    solution_image: Image.Image | np.ndarray | torch.Tensor,
     ground_truth: str,
     extra_info: dict,
     reward_router_address: str,
@@ -131,7 +131,7 @@ async def compute_score_ocr(
     from verl.utils.ray_utils import get_event_loop
 
     # preprocess image to base64
-    image = solution_str
+    image = solution_image
     if isinstance(image, torch.Tensor):
         image = image.float().permute(1, 2, 0).cpu().numpy()
     if isinstance(image, np.ndarray):
@@ -140,8 +140,7 @@ async def compute_score_ocr(
         image = Image.fromarray(image)
     assert isinstance(image, Image.Image)
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        image_base64 = await get_event_loop().run_in_executor(executor, _pil_image_to_base64, image)
+    image_base64 = await get_event_loop().run_in_executor(None, _pil_image_to_base64, image)
 
     # prepare chat template
     grm_prompt = "Please output only the text content from the image without any additional descriptions or formatting."
