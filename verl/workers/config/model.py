@@ -252,6 +252,9 @@ class DiffusersModelConfig(BaseConfig):
     target_modules: Optional[str] = "auto"
     exclude_modules: Optional[str] = None
 
+    # megatron lora config
+    lora: dict[str, Any] = field(default_factory=dict)
+
     # path to pre-trained LoRA adapter to load for continued training
     lora_adapter_path: Optional[str] = None
     use_liger: bool = False
@@ -268,14 +271,10 @@ class DiffusersModelConfig(BaseConfig):
     ema_decay: float = 0.95
 
     # sample related
-    image_height: int = 512
-    image_width: int = 512
     num_inference_steps: int = 10
     noise_level: float = 0.7
     guidance_scale: float = 4.5
     sde_type: str = "sde"  # "sde" or "cps"
-    sde_window_size: Optional[int] = None
-    sde_window_range: Optional[int] = None
 
     def __post_init__(self):
         import_external_libs(self.external_lib)

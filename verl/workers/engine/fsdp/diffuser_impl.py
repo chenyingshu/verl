@@ -342,7 +342,7 @@ class DiffusersFSDPEngine(BaseEngine):
         return module
 
     def _build_scheduler(self):
-        # TODO (Mike): generalize to other diffusers scheduler later
+        # TODO (mike): generalize to other diffusers scheduler later
         from ...utils.diffusers_patch.schedulers import FlowMatchSDEDiscreteScheduler
 
         scheduler = FlowMatchSDEDiscreteScheduler.from_pretrained(
@@ -405,7 +405,7 @@ class DiffusersFSDPEngine(BaseEngine):
         torch.distributed.barrier()
         if self.rank == 0:
             print_model_size(module)
-        log_gpu_memory_usage("After init model from HF AutoModel", logger=logger)
+        log_gpu_memory_usage("After init model from Diffusers AutoModel", logger=logger)
 
         # Wrap model with FSDP for distributed training (sharding, mixed precision, etc.)
         log_gpu_memory_usage("Before FSDP", logger=None)

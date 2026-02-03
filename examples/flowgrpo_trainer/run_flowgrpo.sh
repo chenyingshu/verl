@@ -1,13 +1,13 @@
-# Qwen-Image lora, vllm-omni rollout
+# Qwen-Image lora, vllm_omni rollout
 set -x
-ENGINE=vllm-omni # TBD: determine the engine name
+export TOKENIZERS_PARALLELISM="false"
+
+ENGINE=vllm_omni
 REWARD_ENGINE=vllm
-# If you are using vllm<=0.6.3, you might need to set the following environment variable to avoid bugs:
-# export VLLM_ATTENTION_BACKEND=XFORMERS
 
-reward_path=tests/experimental/reward_loop/reward_fn.py
-reward_model_name=/models/Qwen/Qwen2.5-VL-7B-Instruct
+reward_model_name=$HOME/models/Qwen/Qwen2.5-VL-3B-Instruct
 
+# Mike: free_cache_engine=True has some problem.
 
 python3 -m verl.trainer.main_flowgrpo \
     algorithm.adv_estimator=flow_grpo \
@@ -15,18 +15,17 @@ python3 -m verl.trainer.main_flowgrpo \
     data.val_files=$HOME/dataset/ocr/test.txt \
     data.train_batch_size=8 \
     data.val_max_samples=32 \
-    data.max_prompt_length=512 \
+    data.max_prompt_length=1058 \
     data.filter_overlong_prompts=True \
-    data.data_source=ocr \
+    data.data_source=jpeg_compressibility \
     data.custom_cls.path=verl/utils/dataset/qwen_dataset.py \
     data.custom_cls.name=QwenDataset \
-    actor_rollout_ref.model.path=Qwen/Qwen-Image \
-    actor_rollout_ref.model.tokenizer_path=Qwen/Qwen-Image/tokenizer \
-    actor_rollout_ref.model.use_remove_padding=True \
+    +data.apply_chat_template_kwargs.max_length=1058 \
+    +data.apply_chat_template_kwargs.padding=True \
+    +data.apply_chat_template_kwargs.truncation=True \
+    actor_rollout_ref.model.path=$HOME/models/Qwen/Qwen-Image \
+    actor_rollout_ref.model.tokenizer_path=$HOME/models/Qwen/Qwen-Image/tokenizer \
     actor_rollout_ref.model.enable_gradient_checkpointing=False \
-    actor_rollout_ref.model.guidance_scale=1.0 \
-    actor_rollout_ref.model.noise_level=0.8 \
-    actor_rollout_ref.model.sde_type="sde" \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.model.lora_alpha=64 \
     actor_rollout_ref.actor.optim.lr=1e-4 \
@@ -35,39 +34,32 @@ python3 -m verl.trainer.main_flowgrpo \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.04 \
-    actor_rollout_ref.actor.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.actor.fsdp_config.model_dtype=float16 \
-    actor_rollout_ref.actor.fsdp_config.fsdp_size=1 \
-    +actor_rollout_ref.actor.fsdp_config.mixed_precision.param_dtype=float16 \
+    actor_rollout_ref.actor.fsdp_config.param_offload=True \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+    actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
+    actor_rollout_ref.actor.fsdp_config.fsdp_size=-1 \
+    +actor_rollout_ref.actor.fsdp_config.mixed_precision.param_dtype=bfloat16 \
     actor_rollout_ref.actor.policy_loss.loss_mode=flow_grpo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.n=8 \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.disable_mm_preprocessor_cache=True \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
-    actor_rollout_ref.rollout.enable_chunked_prefill=False \
-    actor_rollout_ref.rollout.enforce_eager=False \
-    actor_rollout_ref.rollout.free_cache_engine=False \
     actor_rollout_ref.rollout.guidance_scale=1.0 \
     actor_rollout_ref.rollout.noise_level=0.8 \
-    actor_rollout_ref.rollout.sde_type="sde" \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.rollout.sde_type=cps \
+    actor_rollout_ref.rollout.agent.default_agent_loop=diffusion_single_turn_agent \
+    actor_rollout_ref.rollout.load_format=safetensors \
+    actor_rollout_ref.rollout.layered_summon=True \
+    actor_rollout_ref.rollout.free_cache_engine=False \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.custom_pipeline=verl.workers.utils.vllm_omni_patch.pipelines.pipeline_qwenimage.QwenImagePipelineWithLogProb \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    custom_reward_function.path=$reward_path \
-    custom_reward_function.name=compute_score_ocr \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
     reward_model.reward_manager=diffusion \
-    reward_model.model.path=$reward_model_name \
-    reward_model.enable=True \
-    reward_model.rollout.name=$REWARD_ENGINE \
-    reward_model.enable_resource_pool=False \
-    reward_model.use_reward_loop=True \
     trainer.use_legacy_worker_impl=disable \
     trainer.logger='["console", "wandb"]' \
-    trainer.project_name='flow_grpo' \
-    trainer.experiment_name='qwen_image_ocr' \
-    trainer.n_gpus_per_node=2 \
+    trainer.project_name=flow_grpo \
+    trainer.experiment_name=qwen_image_ocr \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=100 \
     trainer.test_freq=5 \
