@@ -60,10 +60,13 @@ python3 -m verl.trainer.main_flowgrpo \
     reward_model.reward_manager=diffusion \
     reward_model.model.path=$reward_model_name \
     reward_model.enable=True \
-    reward_model.rollout.name=$REWARD_ENGINE \
-    reward_model.enable_resource_pool=False \
     reward_model.use_reward_loop=True \
-    reward_model.micro_batch_size_per_gpu=8 \
+    reward_model.rollout.name=$REWARD_ENGINE \
+    reward_model.rollout.tensor_model_parallel_size=1 \
+    reward_model.enable_resource_pool=True \
+    reward_model.n_gpus_per_node=1 \
+    reward_model.nnodes=1 \
+    trainer.log_val_generations=6 \
     trainer.use_legacy_worker_impl=disable \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=flow_grpo \
