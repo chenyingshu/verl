@@ -561,8 +561,14 @@ class RayFlowGRPOTrainer:
                 repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True
             )
 
-            # we only do validation on rule-based rm
-            if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
+            # we only do validation on rule-based rm or async reward_loop
+            # NOTE: (susan) based on testing, colocated reward_loop encounters OOM
+            # TODO: (susan) TBD whether support reward model worker
+            if (
+                self.config.reward_model.enable
+                and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model"
+                and self.reward_loop_manager is not None
+            ):
                 return {}
 
             ground_truths = [
@@ -599,7 +605,7 @@ class RayFlowGRPOTrainer:
             print("validation generation end")
 
             # Store generated outputs
-            output_images = test_output_gen_batch.batch["responses"].numpy()
+            output_images = test_output_gen_batch.batch["responses"]
             sample_outputs.append(output_images)
 
             test_batch = test_batch.union(test_output_gen_batch)
@@ -612,7 +618,7 @@ class RayFlowGRPOTrainer:
             sample_inputs.extend(input_texts)
             sample_uids.extend(test_batch.non_tensor_batch["uid"])
 
-            # evaluate using reward_function
+            # evaluate using reward_function or async reward_loop
             reward_tensor, reward_extra_info = self._compute_or_extract_reward(
                 test_batch, reward_fn=self.val_reward_fn, reward_for_val=True
             )
@@ -634,7 +640,7 @@ class RayFlowGRPOTrainer:
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
-        sample_outputs = np.concatenate(sample_outputs, axis=0)
+        sample_outputs = torch.cat(sample_outputs, dim=0)
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         # dump generations
@@ -782,6 +788,7 @@ class RayFlowGRPOTrainer:
         # create a reward model if reward_fn is None
         # for legacy discriminative reward model, we create a reward model worker here
         # for reward loop discriminative reward model, we create a reward loop manager here
+        self.reward_loop_manager = None
         if not self.use_reward_loop:
             # legacy reward model only handle reward-model based scenario
             if self.use_rm:
@@ -834,6 +841,9 @@ class RayFlowGRPOTrainer:
         wg_kwargs["device_name"] = self.device_name
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            # BUG: bugfix (susan) skip empty mapping with async reward_loop (enable_resource_pool=True)
+            if not class_dict:
+                continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = self.ray_worker_group_cls(
                 resource_pool=resource_pool,
@@ -1296,12 +1306,12 @@ class RayFlowGRPOTrainer:
         current_epoch = self.global_steps // len(self.train_dataloader)
 
         # perform validation before training
-        # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+        # we only support validation using the reward_function and reward loop.
+        if self.config.trainer.get("val_before_train", True):
             val_metrics = self._validate()
-            assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
-            logger.log(data=val_metrics, step=self.global_steps)
+            if val_metrics:
+                logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 return
 

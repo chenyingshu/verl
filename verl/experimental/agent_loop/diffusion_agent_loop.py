@@ -408,7 +408,7 @@ class DiffusionAgentLoopWorker:
 
         scores = [input.reward_score for input in inputs]
         if all(score is not None for score in scores):
-            rm_scores = torch.tensor(scores, dtype=torch.float32)
+            rm_scores = torch.tensor(scores, dtype=torch.float32).unsqueeze(-1)
             batch["rm_scores"] = rm_scores
 
         non_tensor_batch = {
@@ -488,9 +488,9 @@ class DiffusionAgentLoopManager(AgentLoopManager):
         self.reward_model_manager = None
         self.reward_router_address = None
         if self.config.reward_model.enable and self.config.reward_model.enable_resource_pool:
-            from verl.experimental.reward_loop import DiffusionRewardLoopManager
+            from verl.experimental.reward_loop import RewardModelManager
 
-            self.reward_model_manager = DiffusionRewardLoopManager(config.reward_model, rm_resource_pool)
+            self.reward_model_manager = RewardModelManager(config.reward_model, rm_resource_pool)
             self.reward_router_address = self.reward_model_manager.get_router_address()
 
         # for recipe to change

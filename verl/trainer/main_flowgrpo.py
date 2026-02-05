@@ -319,7 +319,7 @@ class TaskRunner:
         )
 
         # Load the reward manager for training and validation.
-        if not config.reward_model.use_reward_loop:  # TODO: (susan) change to use reward loop as well?
+        if not config.reward_model.use_reward_loop:
             reward_fn = load_reward_manager(
                 config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
             )
