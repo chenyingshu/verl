@@ -32,7 +32,7 @@ def create_training_config(model_type, strategy, device_count, model):
     if device_count == 1:
         cp = fsdp_size = 1
     else:
-        cp = 2
+        cp = 1  # TODO (mike): test with cp = 2
         fsdp_size = 4
     path = os.path.expanduser(model)
     tokenizer_path = os.path.join(path, "tokenizer")
@@ -67,14 +67,14 @@ def create_training_config(model_type, strategy, device_count, model):
                     "clip_ratio=0.0001",
                     "clip_ratio_high=5.0",
                     "ppo_mini_batch_size=4",
-                    "ppo_micro_batch_size_per_gpu=8",
+                    "ppo_micro_batch_size_per_gpu=4",
                     "optim.lr=1e-4",
                     "optim.weight_decay=0.0001",
                     "fsdp_config.param_offload=False",
                     "fsdp_config.optimizer_offload=False",
-                    "fsdp_config.model_dtype='float16'",
-                    "fsdp_config.dtype='float16'",
-                    "+fsdp_config.mixed_precision.param_dtype='float16'",
+                    "fsdp_config.model_dtype='bfloat16'",
+                    "fsdp_config.dtype='bfloat16'",
+                    "+fsdp_config.mixed_precision.param_dtype='bfloat16'",
                     "fsdp_config.forward_only=False",
                     "fsdp_config.fsdp_size=" + str(fsdp_size),
                     "fsdp_config.ulysses_sequence_parallel_size=" + str(cp),
@@ -99,10 +99,10 @@ def create_training_config(model_type, strategy, device_count, model):
     return training_config, actor_config
 
 
-def create_data_samples() -> DataProto:
+def create_data_samples(num_device: int) -> DataProto:
     from tensordict import TensorDict
 
-    batch_size = 8
+    batch_size = 8 * num_device
     seq_len = 64
     img_size = 512
     latent_dim = 64
@@ -127,9 +127,9 @@ def create_data_samples() -> DataProto:
             "old_log_probs": torch.randn((batch_size, num_train_timesteps)),
             "advantages": torch.randn((batch_size, num_train_timesteps)),
             "responses": torch.randn((batch_size, 3, height, width)),
-            "latents": torch.randn((batch_size, inference_steps, latent_height * latent_width, latent_dim)),
+            "all_latents": torch.randn((batch_size, inference_steps, latent_height * latent_width, latent_dim)),
             "rollout_log_probs": torch.randn((batch_size, num_train_timesteps)),
-            "timesteps": timesteps,
+            "all_timesteps": timesteps,
             "prompt_embeds": torch.randn((batch_size, seq_len, encoder_latent_dim)),
             "prompt_embeds_mask": torch.ones((batch_size, seq_len), dtype=torch.int32),
             "negative_prompt_embeds": torch.randn((batch_size, seq_len, encoder_latent_dim)),
@@ -139,7 +139,7 @@ def create_data_samples() -> DataProto:
         batch_size=batch_size,
     )
     data = DataProto(batch=batch)
-    data.meta_info["cached_steps"] = data.batch["timesteps"].shape[1]
+    data.meta_info["cached_steps"] = data.batch["all_timesteps"].shape[1]
     data.meta_info["global_token_num"] = torch.sum(data.batch["attention_mask"], dim=-1).tolist()
     data.meta_info["use_dynamic_bsz"] = False
     data.meta_info["micro_batch_size_per_gpu"] = 4
@@ -167,7 +167,7 @@ def test_diffusers_fsdp_engine(strategy):
     wg.reset()
 
     # forward only without loss function
-    data_td = create_data_samples().to_tensordict()
+    data_td = create_data_samples(device_count).to_tensordict()
     tu.assign_non_tensor(data_td, compute_loss=False)
     output = wg.infer_batch(data_td)
     output_dict = output.get()
@@ -182,15 +182,15 @@ def test_diffusers_fsdp_engine(strategy):
     wg.set_loss_fn(loss_fn)
 
     # train batch
-    data_td = create_data_samples().to_tensordict()
-    ppo_mini_batch_size = 8
+    data_td = create_data_samples(device_count).to_tensordict()
+    ppo_mini_batch_size = 4
     ppo_epochs = actor_config.ppo_epochs
     seed = 42
     shuffle = actor_config.shuffle
     tu.assign_non_tensor(
         data_td,
-        global_batch_size=ppo_mini_batch_size,
-        mini_batch_size=ppo_mini_batch_size,
+        global_batch_size=ppo_mini_batch_size * device_count,
+        mini_batch_size=ppo_mini_batch_size * device_count,
         epochs=ppo_epochs,
         seed=seed,
         dataloader_kwargs={"shuffle": shuffle},
