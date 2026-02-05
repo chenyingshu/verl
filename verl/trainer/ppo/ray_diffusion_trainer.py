@@ -841,6 +841,7 @@ class RayFlowGRPOTrainer:
         wg_kwargs["device_name"] = self.device_name
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            # BUG: bugfix (susan) skip empty mapping with async reward_loop (enable_resource_pool=True)
             if not class_dict:
                 continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
