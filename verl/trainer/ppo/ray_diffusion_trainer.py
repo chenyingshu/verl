@@ -616,7 +616,7 @@ class RayFlowGRPOTrainer:
             # apply sync reward loop
             if "rm_score" not in test_batch.batch.keys() and self.use_reward_loop:
                 self.checkpoint_manager.sleep_replicas()
-                reward_batch = self.reward_loop_manager.compute_rm_score(test_output_gen_batch)
+                reward_batch = self.reward_loop_manager.compute_rm_score(test_batch)
                 test_batch = test_batch.union(reward_batch)
                 self.checkpoint_manager.update_weights()
 
