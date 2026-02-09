@@ -614,7 +614,7 @@ class RayFlowGRPOTrainer:
             sample_uids.extend(test_batch.non_tensor_batch["uid"])
 
             # apply sync reward loop
-            if "rm_score" not in test_batch.batch.keys() and self.use_reward_loop:
+            if "rm_scores" not in test_batch.batch.keys() and self.use_reward_loop:
                 self.checkpoint_manager.sleep_replicas()
                 reward_batch = self.reward_loop_manager.compute_rm_score(test_batch)
                 test_batch = test_batch.union(reward_batch)
