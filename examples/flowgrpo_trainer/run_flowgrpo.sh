@@ -28,16 +28,14 @@ python3 -m verl.trainer.main_flowgrpo \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
     actor_rollout_ref.model.target_modules="['to_q','to_k','to_v','to_out.0','add_q_proj','add_k_proj','add_v_proj','to_add_out','img_mlp.net.0.proj','img_mlp.net.2','txt_mlp.net.0.proj','txt_mlp.net.2']" \
-    actor_rollout_ref.actor.optim.lr=1e-4 \
+    actor_rollout_ref.actor.optim.lr=3e-4 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    actor_rollout_ref.actor.fsdp_config.fsdp_size=-1 \
-    +actor_rollout_ref.actor.fsdp_config.mixed_precision.param_dtype=bfloat16 \
     actor_rollout_ref.actor.policy_loss.loss_mode=flow_grpo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
@@ -50,7 +48,6 @@ python3 -m verl.trainer.main_flowgrpo \
     actor_rollout_ref.rollout.max_model_len=1058 \
     actor_rollout_ref.rollout.sde_window_size=3 \
     actor_rollout_ref.rollout.sde_window_range="[0,5]" \
-    actor_rollout_ref.rollout.enforce_eager=True \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.custom_pipeline=verl.workers.utils.vllm_omni_patch.pipelines.pipeline_qwenimage.QwenImagePipelineWithLogProb \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     reward_model.reward_manager=diffusion \
