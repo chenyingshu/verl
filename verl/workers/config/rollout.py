@@ -286,12 +286,8 @@ class DiffusionRolloutConfig(BaseConfig):
     name: Optional[str] = MISSING
     mode: str = "async"
 
-    temperature: float = 1.0
-    # top_k: int = -1
-    # top_p: float = 1.0
     do_sample: bool = True
     n: int = 1
-    # repetition_penalty: float = 1.0
 
     # Early termination threshold for multi-turn rollout in sglang.
     # Abort remaining requests when (1 - over_sample_rate) * total_requests are completed.
@@ -302,7 +298,6 @@ class DiffusionRolloutConfig(BaseConfig):
 
     dtype: str = "bfloat16"
     gpu_memory_utilization: float = 0.5
-    # ignore_eos: bool = False
     enforce_eager: bool = True
     cudagraph_capture_sizes: Optional[list] = None
     free_cache_engine: bool = True
@@ -338,21 +333,11 @@ class DiffusionRolloutConfig(BaseConfig):
 
     multi_turn: MultiTurnConfig = field(default_factory=MultiTurnConfig)
 
-    # Server configuration for sglang server mode
-    # server: ServerConfig = field(default_factory=ServerConfig)
-
     # Use Prometheus to collect and monitor rollout statistics
     prometheus: PrometheusConfig = field(default_factory=PrometheusConfig)
 
-    # Extension point for custom configurations
-    # custom: Optional[dict] = None
-
     # Checkpoint Engine config for update weights from trainer to rollout
     checkpoint_engine: CheckpointEngineConfig = field(default_factory=CheckpointEngineConfig)
-
-    # skip_rollout: bool = False
-
-    # skip_dump_dir: str = "/tmp/rollout_dump"
 
     profiler: Optional[ProfilerConfig] = None
 
@@ -364,13 +349,7 @@ class DiffusionRolloutConfig(BaseConfig):
 
     layered_summon: bool = False
 
-    # layer_name_map: dict = field(default_factory=dict)
-
-    # sglang_engine_mode: str = "local"
-
     limit_images: Optional[int] = None
-
-    # skip_tokenizer_init: bool = False
 
     quantization: Optional[str] = None
 
@@ -379,8 +358,6 @@ class DiffusionRolloutConfig(BaseConfig):
     enable_rollout_routing_replay: bool = False
 
     enable_sleep_mode: bool = True
-
-    # mtp: MtpConfig = field(default_factory=MtpConfig)
 
     qat: Optional[dict] = None
 
@@ -423,7 +400,7 @@ class DiffusionRolloutConfig(BaseConfig):
             )
 
         if self.pipeline_model_parallel_size > 1:
-            if self.name == "vllm" or self.name == "sglang" or self.name == "trtllm":
+            if self.name == "vllm_omni" or self.name == "vllm" or self.name == "sglang" or self.name == "trtllm":
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
