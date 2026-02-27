@@ -1091,6 +1091,7 @@ class DiffusionAgentLoopWorker:
             input_ids=input_ids,
             kwargs=kwargs,
         )
+        extra_fields["reward_extra_info"] = output.extra_fields["reward_extra_info"]
 
         return _InternalDiffusionAgentLoopOutput(
             prompt_ids=input_ids,
