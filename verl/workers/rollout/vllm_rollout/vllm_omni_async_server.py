@@ -21,16 +21,14 @@ from pprint import pprint
 from typing import Any, Callable, Optional
 
 import ray
-import torch
 import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
 from ray.actor import ActorHandle
+from vllm.entrypoints.openai.api_server import build_app
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.engine.arg_utils import AsyncOmniEngineArgs
 from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
-from vllm.entrypoints.openai.api_server import build_app
 from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
@@ -453,21 +451,13 @@ class vLLMOmniHttpServer:
         negative_prompt_embeds = mm_output.get("negative_prompt_embeds")
         negative_prompt_embeds_mask = mm_output.get("negative_prompt_embeds_mask")
 
-        def _maybe_to_cpu(v):
-            """Move tensor to CPU so Ray can serialize it for CPU-only workers."""
-            if isinstance(v, torch.Tensor):
-                return v.detach().cpu()
-            return v
-
         extra_info = {
-            "all_latents": _maybe_to_cpu(all_latents[0]) if all_latents is not None else None,
-            "all_timesteps": _maybe_to_cpu(all_timesteps[0]) if all_timesteps is not None else None,
-            "prompt_embeds": _maybe_to_cpu(prompt_embeds[0]) if prompt_embeds is not None else None,
-            "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask[0]) if prompt_embeds_mask is not None else None,
-            "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds[0])
-            if negative_prompt_embeds is not None
-            else None,
-            "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask[0])
+            "all_latents": all_latents[0] if all_latents is not None else None,
+            "all_timesteps": all_timesteps[0] if all_timesteps is not None else None,
+            "prompt_embeds": prompt_embeds[0] if prompt_embeds is not None else None,
+            "prompt_embeds_mask": prompt_embeds_mask[0] if prompt_embeds_mask is not None else None,
+            "negative_prompt_embeds": negative_prompt_embeds[0] if negative_prompt_embeds is not None else None,
+            "negative_prompt_embeds_mask": negative_prompt_embeds_mask[0]
             if negative_prompt_embeds_mask is not None
             else None,
             "global_steps": self.global_steps,
@@ -478,6 +468,7 @@ class vLLMOmniHttpServer:
             finish_reason = final_res.request_output.finish_reason or "stop"
         else:
             finish_reason = "stop"
+
         if finish_reason == "abort":
             stop_reason = "aborted"
         elif finish_reason in ("stop", "length"):
