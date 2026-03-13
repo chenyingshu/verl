@@ -12,10 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import base64
 import json
 import os
-from io import BytesIO
+from typing import Optional
 
 import aiohttp
 import numpy as np
@@ -105,14 +104,6 @@ def compute_score_math_verify(
     )
 
 
-def _pil_image_to_base64(image: Image.Image) -> str:
-    buffered = BytesIO()
-    image.save(buffered, format="PNG")
-    encoded_image_text = base64.b64encode(buffered.getvalue()).decode("utf-8")
-    base64_image = f"data:image;base64,{encoded_image_text}"
-    return base64_image
-
-
 async def compute_score_ocr(
     data_source: str,
     solution_image: Image.Image | np.ndarray | torch.Tensor,
@@ -120,13 +111,34 @@ async def compute_score_ocr(
     extra_info: dict,
     reward_router_address: str,
     reward_model_tokenizer: PreTrainedTokenizer = None,
-    model_name: str = None,
+    model_name: Optional[str] = None,
 ):
-    """Compute the reward score."""
+    """
+    Compute the image OCR score via a generative reward model.
+
+    The function takes in the image and converts it to base64 format,
+    and sends it to a generative reward model (GRM) through a specified router address.
+    The GRM processes the image and returns a response containing the recognized text.
+    The function then compares the recognized text with the ground truth
+    using Levenshtein distance to compute an OCR score between 0 and 1, where 1 indicates a perfect match.
+
+    Args:
+        data_source (str): The source dataset identifier. Unused here but kept for interface consistency.
+        solution_image (Image.Image | np.ndarray | torch.Tensor): The solution image to be evaluated.
+        ground_truth (str): The ground truth text for comparison.
+        extra_info (dict): Additional information needed for scoring. Unused here but kept for interface consistency.
+        reward_router_address (str): The address of the router to send the image for GRM processing.
+        reward_model_tokenizer (PreTrainedTokenizer, optional): Tokenizer for the reward model, unused here.
+        model_name (str, optional): The name or path of the GRM to use for processing the image. Defaults to None.
+
+    Returns:
+        dict: A dictionary containing the computed score, and the raw response from the GRM.
+    """
     import re
 
     import Levenshtein
 
+    from verl.utils.experimental.reward_utils import _pil_image_to_base64
     from verl.utils.ray_utils import get_event_loop
 
     # preprocess image to base64
@@ -185,4 +197,4 @@ async def compute_score_ocr(
     dist = min(dist, len(gt))
     score = 1 - dist / len(gt)
 
-    return {"score": score, "acc": score == 1, "genrm_response": grm_response}
+    return {"score": score, "genrm_response": grm_response}
