@@ -32,6 +32,7 @@ from tqdm import tqdm
 
 from verl import DataProto
 from verl.experimental.one_step_off_policy.utils import need_critic
+from verl.experimental.separation.ray_diffusion_trainer import SeparateRayFlowGRPOTrainer
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
@@ -388,6 +389,145 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         with marked_timer("gen", timing_raw, color="red"):
             _metrics, _timing_raw, epoch, batch, future_reward = await batch_data_future
             batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+            timing_raw.update(batch.meta_info["timing"])
+            timing_raw.update(_timing_raw)
+            metrics.update(_metrics)
+            batch.meta_info.pop("timing", None)
+
+        # sync weights from actor to rollout
+        with marked_timer("sync_rollout_weights", timing_raw, color="purple"):
+            self._fit_update_weights()
+            await self.async_rollout_manager.clear_kv_cache()
+
+        # async next generation
+        if not self.is_last_step:
+            batch_data_future = asyncio.create_task(self._async_gen_next_batch(continuous_iterator))
+            await asyncio.sleep(0)
+        else:
+            batch_data_future = None
+
+        return batch, batch_data_future
+
+
+class OneStepOffRayFlowGRPOTrainer(SeparateRayFlowGRPOTrainer):
+    def __init__(
+        self,
+        config,
+        tokenizer,
+        role_worker_mapping: dict[Role, WorkerType],
+        resource_pool_manager: ResourcePoolManager,
+        ray_worker_group_cls: type[RayWorkerGroup] = RayWorkerGroup,
+        processor=None,
+        train_dataset: Optional[Dataset] = None,
+        val_dataset: Optional[Dataset] = None,
+        collate_fn=None,
+        train_sampler: Optional[Sampler] = None,
+        device_name=None,
+    ):
+        """
+        Initialize distributed Flow-GRPO trainer with Ray backend.
+        Note that this trainer runs on the driver process on a single CPU/GPU node.
+
+        Args:
+            config: Configuration object containing training parameters.
+            tokenizer: Tokenizer used for encoding and decoding text.
+            role_worker_mapping (dict[Role, WorkerType]): Mapping from roles to worker classes.
+            resource_pool_manager (ResourcePoolManager): Manager for Ray resource pools.
+            ray_worker_group_cls (RayWorkerGroup, optional): Class for Ray worker groups. Defaults to RayWorkerGroup.
+            processor: Optional data processor, used for multimodal data
+            train_dataset (Optional[Dataset], optional): Training dataset. Defaults to None.
+            val_dataset (Optional[Dataset], optional): Validation dataset. Defaults to None.
+            collate_fn: Function to collate data samples into batches.
+            train_sampler (Optional[Sampler], optional): Sampler for the training dataset. Defaults to None.
+            device_name (str, optional): Device name for training (e.g., "cuda", "cpu"). Defaults to None.
+        """
+        OneStepOffRayTrainer._init_(
+            self,
+            config,
+            tokenizer,
+            role_worker_mapping,
+            resource_pool_manager,
+            ray_worker_group_cls,
+            processor,
+            train_dataset,
+            val_dataset,
+            collate_fn,
+            train_sampler,
+            device_name,
+        )
+
+        self._create_actor_rollout_classes = OneStepOffRayTrainer._create_actor_rollout_classes
+        self._init_models = OneStepOffRayTrainer._init_models
+        self._init_async_rollout_manager = OneStepOffRayTrainer._init_async_rollout_manager
+        self._create_continuous_iterator = OneStepOffRayTrainer._create_continuous_iterator
+        self._async_gen_next_batch = OneStepOffRayTrainer._async_gen_next_batch
+        self.fit_step = OneStepOffRayTrainer.fit_step
+        self._fit_generate = OneStepOffRayTrainer._fit_generate
+
+    async def fit(self):
+        """
+        The training loop of Flow-GRPO.
+        The driver process only need to call the compute functions of the worker group through RPC
+        to construct the Flow-GRPO dataflow.
+        The light-weight advantage computation is done on the driver process.
+        """
+
+        from verl.utils.tracking import Tracking
+
+        self.logger = Tracking(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+            default_backend=self.config.trainer.logger,
+            config=OmegaConf.to_container(self.config, resolve=True),
+        )
+
+        self.global_steps = 0
+
+        # load checkpoint and update weights before doing anything
+        self._load_checkpoint()
+        self._fit_update_weights()
+
+        # perform validation before training
+        # currently, we only support validation using the reward_function.
+        if self.config.trainer.get("val_before_train", True):
+            val_metrics = self._validate()
+            assert val_metrics, f"{val_metrics=}"
+            pprint(f"Initial validation metrics: {val_metrics}")
+            self.logger.log(data=val_metrics, step=self.global_steps)
+            if self.config.trainer.get("val_only", False):
+                return
+
+        # add tqdm
+        self.progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+
+        # we start from step 1
+        self.global_steps += 1
+        self.last_val_metrics = None
+        self.max_steps_duration = 0
+
+        self.prev_step_profile = False
+        self.curr_step_profile = (
+            self.global_steps in self.config.global_profiler.steps
+            if self.config.global_profiler.steps is not None
+            else False
+        )
+        self.next_step_profile = False
+
+        # across epoch iterator
+        continuous_iterator = self._create_continuous_iterator()
+        # Start the first asynchronous generation task.
+        batch_data_future = asyncio.create_task(self._async_gen_next_batch(continuous_iterator))
+        while batch_data_future is not None:
+            batch_data_future = await self.fit_step(batch_data_future, continuous_iterator)
+            if self.is_last_step:
+                return
+
+    async def _fit_generate(self, batch_data_future, continuous_iterator):
+        metrics = self.metrics
+        timing_raw = self.timing_raw
+
+        with marked_timer("gen", timing_raw, color="red"):
+            _metrics, _timing_raw, epoch, batch, future_reward = await batch_data_future
             timing_raw.update(batch.meta_info["timing"])
             timing_raw.update(_timing_raw)
             metrics.update(_metrics)

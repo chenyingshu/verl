@@ -226,7 +226,7 @@ Instead, we have switched to AgentLoop mode, which also supports multi-turn tool
 ### FSDP2 Configuration Example
 
 ```shell
-python3 -m verl.experimental.one_step_off_policy.async_main_ppo \
+python3 -m verl.experimental.one_step_off_policy.main_ppo \
     --config-path=config \
     --config-name='one_step_off_ppo_trainer.yaml' \
     actor_rollout_ref.actor.strategy=fsdp2 \
@@ -242,10 +242,26 @@ python3 -m verl.experimental.one_step_off_policy.async_main_ppo \
 ### Megatron Configuration Example
 
 ```shell
-python3 -m verl.experimental.one_step_off_policy.async_main_ppo \
+python3 -m verl.experimental.one_step_off_policy.main_ppo \
     --config-path=config \
     --config-name='one_step_off_ppo_megatron_trainer.yaml' \
     actor_rollout_ref.actor.strategy=megatron \
+    # actor and rollout are placed separately
+    actor_rollout_ref.hybrid_engine=False \
+    # actor and rollout resource
+    trainer.nnodes=1 \
+    trainer.n_gpus_per_node=6 \
+    rollout.nnodes=1 \
+    rollout.n_gpus_per_node=2
+```
+
+### Diffison Model Configuration Example
+```shell
+python3 -m verl.experimental.one_step_off_policy.main_ppo \
+    --config-path=config \
+    --config-name='one_step_off_ppo_diffusion_trainer.yaml' \
+    algorithm.adv_estimator=flow_grpo \
+    actor_rollout_ref.actor.strategy=fsdp2 \
     # actor and rollout are placed separately
     actor_rollout_ref.hybrid_engine=False \
     # actor and rollout resource

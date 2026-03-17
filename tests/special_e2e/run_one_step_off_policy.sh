@@ -114,6 +114,68 @@ common_params=(
 
 )
 
+
+# Common parameters for diffusion models
+common_diffusion_params=(
+    data.train_files="${HOME}/data/ocr/train.parquet"
+    data.val_files="${HOME}/data/ocr/test.parquet"
+    data.prompt_key=prompt
+    data.truncation='left'
+    data.max_prompt_length=${max_prompt_length}
+    data.filter_overlong_prompts=True
+    data.apply_chat_template_kwargs.max_length=${max_prompt_length}
+    data.apply_chat_template_kwargs.padding=True
+    data.apply_chat_template_kwargs.truncation=True
+    data.train_batch_size=${train_prompt_bsz}
+    actor_rollout_ref.rollout.n=${n_resp_per_prompt}
+    algorithm.adv_estimator=${adv_estimator}
+    algorithm.use_kl_in_reward=${use_kl_in_reward}
+    algorithm.kl_ctrl.v=${kl_coef}
+    actor_rollout_ref.hybrid_engine=False \
+    actor_rollout_ref.actor.use_kl_loss=${use_kl_loss}
+    actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef}
+    actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low}
+    actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high}
+    actor_rollout_ref.actor.clip_ratio_c=10.0
+    actor_rollout_ref.model.path="${MODEL_PATH}"
+    actor_rollout_ref.actor.optim.lr=3e-4
+    actor_rollout_ref.actor.optim.weight_decay=0.0001
+    actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz}
+    actor_rollout_ref.rollout.val_kwargs.do_sample=True
+    actor_rollout_ref.rollout.val_kwargs.n=1
+    actor_rollout_ref.rollout.name=vllm_omni
+    actor_rollout_ref.rollout.checkpoint_engine.backend='nccl'
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
+    reward.num_workers=4
+    reward.reward_manager.name=image
+    reward.reward_model.enable=True
+    reward.reward_model.model_path=$HOME/models/Qwen/Qwen3-VL-8B-Instruct
+    reward.reward_model.rollout.name=vllm
+    reward.reward_model.enable_resource_pool=True
+    reward.reward_model.nnodes=1
+    reward.reward_model.n_gpus_per_node=1
+    reward.reward_model.rollout.gpu_memory_utilization=0.9
+    reward.reward_model.rollout.free_cache_engine=False
+    reward.reward_model.rollout.tensor_model_parallel_size=1
+    reward.reward_model.rollout.enforce_eager=False
+    reward.custom_reward_function.path=tests/experimental/reward_loop/reward_fn.py
+    reward.custom_reward_function.name=compute_score_ocr
+    trainer.logger=['console']
+    trainer.project_name='verl-test'
+    trainer.experiment_name="${exp_name}"
+    trainer.val_before_train=True
+    trainer.test_freq=-1
+    trainer.save_freq=-1
+    trainer.total_epochs=2
+    trainer.total_training_steps=2
+    trainer.resume_mode=disable
+    trainer.nnodes=1
+    trainer.n_gpus_per_node=${n_gpus_training}
+    rollout.nnodes=1
+    rollout.n_gpus_per_node=${n_gpus_rollout}
+
+)
+
     # Detect device
     device_name=$(python3 - <<'EOF'
 from verl.utils.device import get_device_name
@@ -130,23 +192,40 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
     ref_offload=True
     actor_offload=False
 
-    python3 -m verl.experimental.one_step_off_policy.main_ppo \
-        "${common_params[@]}" \
-        actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
-        critic.strategy=fsdp2 \
-        actor_rollout_ref.actor.grad_clip=1.0 \
-        actor_rollout_ref.model.use_remove_padding=True \
-        actor_rollout_ref.model.enable_gradient_checkpointing=True \
-        actor_rollout_ref.actor.use_dynamic_bsz=True \
-        actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
-        actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
-        actor_rollout_ref.actor.fsdp_config.param_offload=${actor_offload} \
-        actor_rollout_ref.actor.fsdp_config.optimizer_offload=${actor_offload} \
-        actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-        actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
-        actor_rollout_ref.ref.fsdp_config.param_offload=${ref_offload} \
-        actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
-        actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} $@
+    if [ "${adv_estimator}" == "flow_grpo" ]; then
+
+        python3 -m verl.experimental.one_step_off_policy.main_ppo \
+            --config-path=config \
+            --config-name='one_step_off_ppo_diffusion_trainer.yaml' \
+            "${common_diffusion_params[@]}" \
+            actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
+            critic.strategy=fsdp2 \
+            actor_rollout_ref.actor.fsdp_config.param_offload=${actor_offload} \
+            actor_rollout_ref.actor.fsdp_config.optimizer_offload=${actor_offload} \
+            actor_rollout_ref.ref.fsdp_config.param_offload=${ref_offload} \
+            actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} $@
+
+        echo "One-step-off-policy E2E test completed successfully with ${adv_estimator} strategy"
+
+    else
+        python3 -m verl.experimental.one_step_off_policy.main_ppo \
+            "${common_params[@]}" \
+            actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
+            critic.strategy=fsdp2 \
+            actor_rollout_ref.actor.grad_clip=1.0 \
+            actor_rollout_ref.model.use_remove_padding=True \
+            actor_rollout_ref.model.enable_gradient_checkpointing=True \
+            actor_rollout_ref.actor.use_dynamic_bsz=True \
+            actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
+            actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
+            actor_rollout_ref.actor.fsdp_config.param_offload=${actor_offload} \
+            actor_rollout_ref.actor.fsdp_config.optimizer_offload=${actor_offload} \
+            actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
+            actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
+            actor_rollout_ref.ref.fsdp_config.param_offload=${ref_offload} \
+            actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
+            actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} $@
+    fi
 
 elif [ "${ACTOR_STRATEGY}" == "megatron" ]; then
     echo "Running with Megatron strategy..."

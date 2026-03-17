@@ -23,7 +23,7 @@ import socket
 import hydra
 import ray
 
-from verl.experimental.one_step_off_policy.ray_trainer import OneStepOffRayTrainer
+from verl.experimental.one_step_off_policy.ray_trainer import OneStepOffRayFlowGRPOTrainer, OneStepOffRayTrainer
 from verl.experimental.one_step_off_policy.utils import need_critic
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
@@ -130,9 +130,13 @@ class OneStepTaskRunner:
         from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)
-        tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        tokenizer = hf_tokenizer(config.actor_rollout_ref.model.tokenizer_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
-        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        if os.path.exists(os.path.join(local_path, "processor")):
+            processor_path = os.path.join(local_path, "processor")
+        else:
+            processor_path = local_path
+        processor = hf_processor(processor_path, trust_remote_code=trust_remote_code, use_fast=True)
 
         resource_pool_manager = create_resource_pool_manager(config, role_worker_mapping.keys())
 
@@ -147,12 +151,22 @@ class OneStepTaskRunner:
             max_samples=config.data.get("train_max_samples", -1),
         )
         val_dataset = create_rl_dataset(
-            config.data.val_files, config.data, tokenizer, processor, max_samples=config.data.get("val_max_samples", -1)
+            config.data.val_files,
+            config.data,
+            tokenizer,
+            processor,
+            is_Train=False,
+            max_samples=config.data.get("val_max_samples", -1),
         )
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Initialize the PPO trainer.
-        trainer = OneStepOffRayTrainer(
+        trainer_cls = (
+            OneStepOffRayFlowGRPOTrainer
+            if config.actor_rollout_ref.model.get("model_type", None) == "diffusion_model"
+            else OneStepOffRayTrainer
+        )
+        trainer = trainer_cls(
             config=config,
             tokenizer=tokenizer,
             processor=processor,
