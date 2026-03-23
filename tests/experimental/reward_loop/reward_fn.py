@@ -171,7 +171,7 @@ async def compute_score_ocr(
     ]
 
     sampling_params = {"temperature": 0.7, "top_p": 0.8, "max_tokens": 4096}
-    model_name = model_name or os.path.expanduser("~/models/Qwen/Qwen2.5-VL-3B-Instruct")
+    model_name = model_name or os.path.expanduser("~/models/tiny-random/qwen3-vl")
     chat_complete_request = {
         "messages": messages,
         "model": model_name,

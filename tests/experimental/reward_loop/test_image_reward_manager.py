@@ -73,7 +73,7 @@ def test_reward_model_genrm():
         config = compose(config_name="ppo_trainer")
 
     rollout_model_name = os.path.expanduser("~/models/tiny-random/Qwen-Image")
-    reward_model_name = os.path.expanduser("~/models/Qwen/Qwen2.5-VL-3B-Instruct")
+    reward_model_name = os.path.expanduser("~/models/tiny-random/qwen3-vl")
 
     config.actor_rollout_ref.model.path = rollout_model_name
     config.actor_rollout_ref.model.tokenizer_path = os.path.join(rollout_model_name, "tokenizer")
