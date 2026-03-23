@@ -200,7 +200,15 @@ def get_moe_num_layers_to_build(
     """
     total_layers = get_num_layers_to_build(config, vp_stage=vp_stage, pp_rank=pp_rank)
 
-    layer_offset = get_transformer_layer_offset(config, vp_stage=vp_stage, pp_rank=pp_rank)
+    sig = inspect.signature(get_transformer_layer_offset)
+    # core 0.12.1 is not support vp_stage and pp_rank as parameters
+    if "vp_stage" in sig.parameters and "pp_rank" in sig.parameters:
+        layer_offset = get_transformer_layer_offset(config, vp_stage=vp_stage, pp_rank=pp_rank)
+    elif "pp_rank" in sig.parameters:
+        layer_offset = get_transformer_layer_offset(config, pp_rank=pp_rank)
+    else:
+        layer_offset = get_transformer_layer_offset(config)
+
     local_global_indices = range(layer_offset, layer_offset + total_layers)
 
     num_moe_layers = sum(1 for idx in local_global_indices if is_moe_layer(config, idx))
@@ -279,7 +287,7 @@ def set_router_replay_data(layers_topk_idx, attention_mask, tf_config, vp_rank=N
     """
     with torch.no_grad():
         if layers_topk_idx.is_nested:
-            layers_topk_idx_rmpad, _ = preprocess_thd_no_padding(layers_topk_idx, pre_process=True)
+            layers_topk_idx_rmpad, _, _ = preprocess_thd_no_padding(layers_topk_idx, pre_process=True)
         else:
             layers_topk_idx_rmpad, _ = preprocess_packed_seqs(layers_topk_idx, attention_mask, pre_process=True)
         layers_topk_idx_rmpad = layers_topk_idx_rmpad.contiguous()  # 1, dynamic_bs_all, layer_num, topk
