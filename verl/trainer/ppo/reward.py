@@ -19,7 +19,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from verl import DataProto
-from verl.utils.reward_score import default_compute_score, default_compute_score_image
+from verl.utils.reward_score import get_default_compute_score
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
@@ -123,9 +123,8 @@ def load_reward_manager(config: DictConfig, tokenizer: Any, **reward_kwargs: Any
             load_extern_object(module_path=module_cfg.path, object_name=reward_manager_cls_name),
         )
 
-    default_compute_score_ = (
-        default_compute_score_image if reward_manager_cfg.name == "image" else default_compute_score
-    )
+    default_compute_score_ = get_default_compute_score(reward_manager_cfg.name)
+
     if compute_score is None:
         sandbox_config = config.reward.get("sandbox_fusion")
         sandbox_url = sandbox_config.get("url") if sandbox_config else None

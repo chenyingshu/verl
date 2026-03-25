@@ -124,7 +124,7 @@ jobs:
         run: |
           pip3 install python-Levenshtein
           unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
-          ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_image_reward_manager.py
+          ROLLOUT_NAME=vllm pytest -s -x tests/experimental/reward_loop/test_visual_reward_manager.py
 
   cleanup:
     runs-on: ubuntu-latest

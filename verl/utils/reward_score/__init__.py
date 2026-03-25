@@ -173,4 +173,12 @@ def _default_compute_score(
     )
 
 
+def get_default_compute_score(reward_name: str | None):
+    """Get the default compute_score function based on the reward manager type."""
+    if reward_name == "visual":
+        return default_compute_score_image
+    else:
+        return default_compute_score
+
+
 __all__ = ["default_compute_score"]

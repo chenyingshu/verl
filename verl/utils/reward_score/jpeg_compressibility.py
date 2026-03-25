@@ -53,7 +53,7 @@ def compute_score(solution_image):
     """The scoring function for JPEG compressibility.
 
     Args:
-        solution_image: the solution image
+        solution_image: the solution image or video, in shape (C, H, W) or (N, C, H, W).
     """
     if isinstance(solution_image, torch.Tensor) and solution_image.ndim == 3:
         solution_image = solution_image.unsqueeze(0)

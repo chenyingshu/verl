@@ -18,7 +18,7 @@ from .gdpo import GDPORewardManager
 from .naive import NaiveRewardManager
 from .limited import RateLimitedRewardManager
 from .remote import RemoteRewardManager
-from .image import ImageRewardManager
+from .visual import VisualRewardManager
 
 __all__ = [
     "DAPORewardManager",
@@ -26,7 +26,7 @@ __all__ = [
     "NaiveRewardManager",
     "RateLimitedRewardManager",
     "RemoteRewardManager",
-    "ImageRewardManager",
+    "VisualRewardManager",
     "register",
     "get_reward_manager_cls",
 ]

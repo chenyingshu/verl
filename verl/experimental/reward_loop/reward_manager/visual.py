@@ -20,9 +20,9 @@ from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.reward_score import default_compute_score_image
 
 
-@register("image")
-class ImageRewardManager(RewardManagerBase):
-    """The reward manager for image response."""
+@register("visual")
+class VisualRewardManager(RewardManagerBase):
+    """The reward manager for visual response."""
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
         super().__init__(config, tokenizer, compute_score)
@@ -34,7 +34,7 @@ class ImageRewardManager(RewardManagerBase):
     async def run_single(self, data: DataProto) -> dict:
         assert len(data) == 1, "Only support single data item"
         data_item = data[0]
-        response_image = data_item.batch["responses"]
+        response_visual = data_item.batch["responses"]
         data_source = data_item.non_tensor_batch["data_source"]
         ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
         extra_info = data_item.non_tensor_batch.get("extra_info", {})
@@ -59,7 +59,7 @@ class ImageRewardManager(RewardManagerBase):
         if self.is_async_reward_score:
             result = await self.compute_score(
                 data_source=data_source,
-                solution_image=response_image,
+                solution_image=response_visual,
                 ground_truth=ground_truth,
                 extra_info=extra_info,
                 **extra_reward_kwargs,
@@ -69,7 +69,7 @@ class ImageRewardManager(RewardManagerBase):
                 None,
                 lambda: self.compute_score(
                     data_source=data_source,
-                    solution_image=response_image,
+                    solution_image=response_visual,
                     ground_truth=ground_truth,
                     extra_info=extra_info,
                     **extra_reward_kwargs,
