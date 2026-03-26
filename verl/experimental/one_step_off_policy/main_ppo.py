@@ -23,11 +23,11 @@ import socket
 import hydra
 import ray
 
-from verl.experimental.one_step_off_policy.ray_trainer import OneStepOffRayFlowGRPOTrainer, OneStepOffRayTrainer
-from verl.experimental.one_step_off_policy.utils import need_critic
+from verl.experimental.one_step_off_policy.ray_diffusion_trainer import OneStepOffRayFlowGRPOTrainer
+from verl.experimental.one_step_off_policy.ray_trainer import OneStepOffRayTrainer
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-from verl.trainer.ppo.utils import Role, need_reference_policy
+from verl.trainer.ppo.utils import Role, need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device
 
@@ -55,9 +55,24 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
         resource_pool_spec["trainer_pool"] = trainer_pool
 
         # Map training-related roles to the same resource pool
-        for role in [Role.Actor, Role.Critic, Role.RefPolicy, Role.RewardModel]:
+        for role in [Role.Actor, Role.Critic, Role.RefPolicy]:
             if role in roles:
                 mapping[role] = "trainer_pool"
+
+        if config.reward.reward_model.enable:
+            if config.reward.reward_model.enable_resource_pool:
+                mapping[Role.RewardModel] = "reward_pool"
+                assert config.reward.reward_model.n_gpus_per_node > 0, (
+                    "config.reward.reward_model.n_gpus_per_node must be greater than 0"
+                )
+                assert config.reward.reward_model.nnodes > 0, "config.reward.reward_model.nnodes must be greater than 0"
+
+                reward_pool = [config.reward.reward_model.n_gpus_per_node] * config.reward.reward_model.nnodes
+                resource_pool_spec["reward_pool"] = reward_pool
+            else:
+                mapping[Role.RewardModel] = "trainer_pool"
+                config.reward.reward_model.nnodes = config.trainer.nnodes
+                config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
     # Rollout resource pool
     if Role.Rollout in roles:
@@ -155,7 +170,6 @@ class OneStepTaskRunner:
             config.data,
             tokenizer,
             processor,
-            is_Train=False,
             max_samples=config.data.get("val_max_samples", -1),
         )
         train_sampler = create_rl_sampler(config.data, train_dataset)

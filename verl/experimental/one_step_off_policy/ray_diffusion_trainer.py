@@ -31,8 +31,8 @@ from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
 from verl import DataProto
-from verl.experimental.one_step_off_policy.utils import need_critic
-from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
+from verl.trainer.ppo.utils import need_critic
+from verl.experimental.separation.ray_diffusion_trainer import SeparateRayFlowGRPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.ray_trainer import (
@@ -46,7 +46,7 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.tracking import ValidationGenerationsLogger
 
 
-class OneStepOffRayTrainer(SeparateRayPPOTrainer):
+class OneStepOffRayFlowGRPOTrainer(SeparateRayFlowGRPOTrainer):
     def __init__(
         self,
         config,
@@ -62,7 +62,7 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
         device_name=None,
     ):
         """
-        Initialize distributed PPO trainer with Ray backend.
+        Initialize distributed Flow-GRPO trainer with Ray backend.
         Note that this trainer runs on the driver process on a single CPU/GPU node.
 
         Args:
@@ -148,24 +148,6 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
                 role=str(role),
             )
             self.resource_pool_to_cls[resource_pool][str(role)] = role_cls
-
-    def _init_models(self):
-        if self.use_critic:
-            self.critic_wg = self.all_wg[str(Role.Critic)]
-            self.critic_wg.init_model()
-
-        if self.use_reference_policy and not self.ref_in_actor:
-            self.ref_policy_wg = self.all_wg[str(Role.RefPolicy)]
-            self.ref_policy_wg.init_model()
-
-        self.rm_wg = None
-        if self.use_rm:
-            self.rm_wg = self.all_wg[str(Role.RewardModel)]
-            self.rm_wg.init_model()
-
-        self.actor_wg = self.all_wg[str(Role.Actor)]
-        self.actor_wg.init_model()
-        self.actor_rollout_wg = self.actor_wg
 
     def _init_async_rollout_manager(self):
         # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
@@ -256,9 +238,9 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
 
     async def fit(self):
         """
-        The training loop of PPO.
+        The training loop of Flow-GRPO.
         The driver process only need to call the compute functions of the worker group through RPC
-        to construct the PPO dataflow.
+        to construct the Flow-GRPO dataflow.
         The light-weight advantage computation is done on the driver process.
         """
 
@@ -286,10 +268,6 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
             self.logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 return
-
-        if self.config.actor_rollout_ref.rollout.get("skip_rollout", False):
-            rollout_skip = RolloutSkip(self.config, self.actor_rollout_wg)
-            rollout_skip.wrap_generate_sequences()
 
         # add tqdm
         self.progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
@@ -387,7 +365,6 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
 
         with marked_timer("gen", timing_raw, color="red"):
             _metrics, _timing_raw, epoch, batch, future_reward = await batch_data_future
-            batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
             timing_raw.update(batch.meta_info["timing"])
             timing_raw.update(_timing_raw)
             metrics.update(_metrics)
