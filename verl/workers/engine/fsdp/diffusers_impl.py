@@ -857,7 +857,7 @@ class DiffusersFSDPEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
-    def get_per_tensor_param(self, layered_summon=True, base_sync_done=True, **kwargs):
+    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         load_fsdp_model_to_gpu(self.module)

@@ -214,7 +214,6 @@ if [ "${ACTOR_STRATEGY}" == "fsdp2" ]; then
             critic.strategy=fsdp2 \
             actor_rollout_ref.actor.fsdp_config.param_offload=${actor_offload} \
             actor_rollout_ref.actor.fsdp_config.optimizer_offload=${actor_offload} \
-            actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
             actor_rollout_ref.ref.fsdp_config.param_offload=${ref_offload} \
             actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size} $@
 

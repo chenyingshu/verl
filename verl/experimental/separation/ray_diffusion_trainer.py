@@ -240,7 +240,7 @@ class SeparateRayFlowGRPOTrainer(RayFlowGRPOTrainer):
         self.rm_wg = None  # use reward loop by default, no need to create reward model worker group
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
-        self.actor_wg = self.all_wg[str(Role.ActorRollout)]
+        self.actor_wg = self.all_wg[str(Role.Actor)]
         self.actor_wg.init_model()
         self.actor_rollout_wg = self.actor_wg
 

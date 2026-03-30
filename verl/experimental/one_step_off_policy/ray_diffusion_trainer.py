@@ -31,18 +31,16 @@ from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
 from verl import DataProto
-from verl.trainer.ppo.utils import need_critic
 from verl.experimental.separation.ray_diffusion_trainer import SeparateRayFlowGRPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
-from verl.trainer.ppo.ray_trainer import (
+from verl.trainer.ppo.ray_diffusion_trainer import (
     ResourcePoolManager,
     compute_response_mask,
 )
 from verl.trainer.ppo.reward import extract_reward
-from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy, need_reward_model
+from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.debug import marked_timer
-from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.tracking import ValidationGenerationsLogger
 
 

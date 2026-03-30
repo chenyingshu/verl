@@ -145,7 +145,10 @@ class OneStepTaskRunner:
         from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)
-        tokenizer = hf_tokenizer(config.actor_rollout_ref.model.tokenizer_path, trust_remote_code=trust_remote_code)
+        input_tokenizer_path = config.actor_rollout_ref.model.tokenizer_path
+        if input_tokenizer_path is None:
+            input_tokenizer_path = local_path
+        tokenizer = hf_tokenizer(input_tokenizer_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
         if os.path.exists(os.path.join(local_path, "processor")):
             processor_path = os.path.join(local_path, "processor")
