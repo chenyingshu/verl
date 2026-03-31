@@ -491,17 +491,15 @@ class DiffusersFSDPEngine(BaseEngine):
         # note that the global_batch_size should include data on all the dp
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
 
-        # compute num_tokens in global batch for loss normalization
-        batch_num_tokens = data["loss_mask"].sum().to(get_device_id())
-        torch.distributed.all_reduce(
-            batch_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
-        )
-        tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
+        num_timesteps = data["all_timesteps"].shape[1]
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
 
         micro_batches, indices = prepare_micro_batches(
             data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
         )
+
+        gradient_accumulation_steps = len(micro_batches) * num_timesteps
+        tu.assign_non_tensor(data, gradient_accumulation_steps=gradient_accumulation_steps)
 
         output_lst = []
 
@@ -513,7 +511,7 @@ class DiffusersFSDPEngine(BaseEngine):
                 "loss": [],
                 "metrics": [],
             }
-            for step in range(micro_batch["all_timesteps"].shape[1]):
+            for step in range(num_timesteps):
                 with ctx:
                     loss, meta_info = self.forward_step(
                         micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
@@ -717,8 +715,11 @@ class DiffusersFSDPEngine(BaseEngine):
                 },
                 {
                     "dp_size": tu.get_non_tensor_data(micro_batch, "dp_size", None),
-                    "batch_num_tokens": tu.get_non_tensor_data(micro_batch, "batch_num_tokens", None),
+                    "batch_num_tokens": None,
                     "global_batch_size": tu.get_non_tensor_data(micro_batch, "global_batch_size", None),
+                    "gradient_accumulation_steps": tu.get_non_tensor_data(
+                        micro_batch, "gradient_accumulation_steps", default=1
+                    ),
                 },
             )
             if micro_batch.get("ref_log_prob", None) is not None:

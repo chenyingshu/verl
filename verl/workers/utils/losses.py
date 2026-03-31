@@ -185,6 +185,10 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         metrics["kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
         metrics["kl_coef"] = config.kl_loss_coef
 
+    gradient_accumulation_steps = tu.get_non_tensor_data(data, "gradient_accumulation_steps", default=None)
+    if gradient_accumulation_steps is not None:
+        policy_loss = policy_loss / gradient_accumulation_steps
+
     return policy_loss, metrics
 
 
