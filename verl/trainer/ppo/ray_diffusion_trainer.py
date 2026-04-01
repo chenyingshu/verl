@@ -40,15 +40,14 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator
-from verl.trainer.ppo.metric_utils import (
-    compute_data_metrics,
-    compute_throughout_metrics,
-    compute_timing_metrics,
-    compute_variance_proxy_metrics,
-    process_validation_metrics,
+from verl.trainer.ppo.diffusion_metric_utils import (
+    compute_data_metrics_diffusion,
+    compute_throughout_metrics_diffusion,
+    compute_timing_metrics_diffusion,
 )
+from verl.trainer.ppo.metric_utils import compute_variance_proxy_metrics, process_validation_metrics
 from verl.trainer.ppo.reward import extract_reward
-from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
+from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy, need_reward_model
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
@@ -56,9 +55,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
-from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import embeds_padding_2_no_padding
 
 
@@ -67,13 +64,16 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
 
 def compute_response_mask(data: DataProto):
-    """Compute the attention mask for latents
+    """Compute the response mask for denoising timesteps.
+
+    For diffusion models, every denoising timestep is a valid "response" step,
+    so the mask is all-ones with shape [batch, num_timesteps].
 
     Args:
         data (DataProto): The data containing batched model outputs and inputs.
 
     Returns:
-        torch.Tensor: The attention mask for the response tokens.
+        torch.Tensor: The response mask over denoising timesteps, shape [batch, num_timesteps].
     """
     all_latents = data.batch["all_latents"]
     b, t, _, _ = all_latents.shape
@@ -114,7 +114,7 @@ def compute_advantage(
 
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_flow_grpo_outcome_advantage(
-            token_level_rewards=data.batch["token_level_rewards"],
+            token_level_rewards=data.batch["sample_level_rewards"],
             response_mask=grpo_calculation_mask,
             index=data.non_tensor_batch["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
@@ -126,7 +126,7 @@ def compute_advantage(
         # handle all other adv estimator type other than GAE and GRPO
         adv_estimator_fn = core_algos.get_adv_estimator_fn(adv_estimator)
         adv_kwargs = {
-            "token_level_rewards": data.batch["token_level_rewards"],
+            "token_level_rewards": data.batch["sample_level_rewards"],
             "response_mask": data.batch["response_mask"],
             "config": config,
         }
@@ -203,7 +203,6 @@ class RayFlowGRPOTrainer:
 
         self.use_rm = need_reward_model(self.config)
 
-        self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
         self.validation_generations_logger = ValidationGenerationsLogger(
@@ -223,7 +222,6 @@ class RayFlowGRPOTrainer:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
-        self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -306,8 +304,6 @@ class RayFlowGRPOTrainer:
             with open_dict(self.config):
                 if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
                     self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
-                if OmegaConf.select(self.config, "critic.optim"):
-                    self.config.critic.optim.total_training_steps = total_training_steps
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
@@ -364,7 +360,7 @@ class RayFlowGRPOTrainer:
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
             outputs = batch.batch["responses"]
-            scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+            scores = batch.batch["sample_level_scores"].sum(-1).cpu().tolist()
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
 
             reward_extra_infos_to_dump = reward_extra_infos_dict.copy()
@@ -632,37 +628,6 @@ class RayFlowGRPOTrainer:
         else:
             raise NotImplementedError
 
-        # create critic
-        if self.use_critic:
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
-
-            from verl.workers.config import CriticConfig
-
-            critic_cfg: CriticConfig = omega_conf_to_dataclass(self.config.critic)
-
-            if self.use_legacy_worker_impl == "disable":
-                # convert critic_cfg into TrainingWorkerConfig
-                from verl.workers.engine_workers import TrainingWorkerConfig
-
-                orig_critic_cfg = critic_cfg
-                if orig_critic_cfg.strategy == "fsdp":
-                    engine_config: FSDPEngineConfig = orig_critic_cfg.model.fsdp_config
-                    engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
-                    engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
-                else:
-                    raise NotImplementedError(f"Unknown strategy {orig_critic_cfg.strategy=}")
-
-                critic_cfg = TrainingWorkerConfig(
-                    model_type="value_model",
-                    model_config=orig_critic_cfg.model_config,
-                    engine_config=engine_config,
-                    optimizer_config=orig_critic_cfg.optim,
-                    checkpoint_config=orig_critic_cfg.checkpoint,
-                )
-
-            critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)
-            self.resource_pool_to_cls[resource_pool][str(Role.Critic)] = critic_cls
-
         # create reference policy if needed
         if self.use_reference_policy and Role.RefPolicy in self.role_worker_mapping:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
@@ -706,20 +671,6 @@ class RayFlowGRPOTrainer:
             )
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
-
-        if self.use_critic:
-            self.critic_wg = all_wg[str(Role.Critic)]
-            if self.use_legacy_worker_impl == "disable":
-                self.critic_wg.reset()
-                # assign critic loss
-                from functools import partial
-
-                from verl.workers.utils.losses import value_loss
-
-                value_loss_ = partial(value_loss, config=orig_critic_cfg)
-                self.critic_wg.set_loss_fn(value_loss_)
-            else:
-                self.critic_wg.init_model()
 
         if self.use_reference_policy and not self.ref_in_actor:
             if str(Role.RefPolicy) in all_wg:
@@ -811,26 +762,10 @@ class RayFlowGRPOTrainer:
         max_actor_ckpt_to_keep = (
             self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
         )
-        max_critic_ckpt_to_keep = (
-            self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
-        )
 
         self.actor_rollout_wg.save_checkpoint(
             actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
         )
-
-        if self.use_critic:
-            critic_local_path = os.path.join(local_global_step_folder, str(Role.Critic))
-            critic_remote_path = (
-                None
-                if self.config.trainer.default_hdfs_dir is None
-                else os.path.join(
-                    self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", str(Role.Critic)
-                )
-            )
-            self.critic_wg.save_checkpoint(
-                critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep
-            )
 
         # save dataloader
         local_mkdir_safe(local_global_step_folder)
@@ -891,16 +826,10 @@ class RayFlowGRPOTrainer:
         print(f"Resuming from {global_step_folder}")
 
         actor_path = os.path.join(global_step_folder, "actor")
-        critic_path = os.path.join(global_step_folder, str(Role.Critic))
         # load actor
         self.actor_rollout_wg.load_checkpoint(
             actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
         )
-        # load critic
-        if self.use_critic:
-            self.critic_wg.load_checkpoint(
-                critic_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
-            )
 
         # load dataloader,
         # TODO: from remote not implemented yet
@@ -917,8 +846,6 @@ class RayFlowGRPOTrainer:
             self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
             if self.use_reference_policy:
                 self.ref_policy_wg.start_profile(profile_step=self.global_steps)
-            if self.use_critic:
-                self.critic_wg.start_profile(profile_step=self.global_steps)
 
     def _stop_profiling(self, do_profile: bool) -> None:
         """Stop profiling for all worker groups if profiling is enabled."""
@@ -926,239 +853,70 @@ class RayFlowGRPOTrainer:
             self.actor_rollout_wg.stop_profile()
             if self.use_reference_policy:
                 self.ref_policy_wg.stop_profile()
-            if self.use_critic:
-                self.critic_wg.stop_profile()
-
-    def _get_dp_size(self, worker_group, role: str) -> int:
-        """Get data parallel size from worker group dispatch info.
-
-        This method retrieves the data parallel size by querying the dispatch info
-        for the specified role. The dispatch info is cached for subsequent calls.
-
-        Args:
-            worker_group: The worker group to query dispatch info from.
-            role: The role name (e.g., "actor", "critic") to get DP size for.
-
-        Returns:
-            The data parallel size (number of DP ranks).
-        """
-        if role not in worker_group._dispatch_info:
-            dp_rank_mapping = worker_group._query_dispatch_info(role)
-            worker_group._dispatch_info[role] = dp_rank_mapping
-        else:
-            dp_rank_mapping = worker_group._dispatch_info[role]
-        return max(dp_rank_mapping) + 1
-
-    def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
-        """Reorder the data on single controller such that each dp rank gets similar total tokens.
-
-        When use_prefix_grouper is enabled, uses group-level balancing to keep samples with
-        the same uid together on the same rank for prefix sharing optimization.
-        """
-        attention_mask = batch.batch["attention_mask"]
-        batch_size = attention_mask.shape[0]
-        global_seqlen_lst = batch.batch["attention_mask"].view(batch_size, -1).sum(-1)  # (train_batch_size,)
-        workload_lst = calculate_workload(global_seqlen_lst)
-        # Get dp_size from dispatch info to correctly balance across data parallel ranks
-        # Note: world_size may include tensor/pipeline parallel dimensions, but we only want DP
-        dp_size = self._get_dp_size(self.actor_rollout_wg, "actor")
-
-        # Use group-level balancing for PrefixGrouper to keep same-uid samples together
-        if getattr(self, "use_prefix_grouper", False) and "uid" in batch.non_tensor_batch:
-            from verl.utils.seqlen_balancing import get_group_balanced_partitions
-
-            uid_list = list(batch.non_tensor_batch["uid"])
-            seqlen_list = global_seqlen_lst.tolist()
-
-            # Count number of uid groups
-            num_groups = len(set(uid_list))
-
-            if num_groups % dp_size != 0:
-                raise ValueError(
-                    f"PrefixGrouper with balance_batch requires num_uid_groups ({num_groups}) "
-                    f"% dp_size ({dp_size}) == 0. "
-                    f"This ensures each rank gets equal number of groups. "
-                    f"Current batch_size={batch_size}, adjust batch_size to be a multiple of "
-                    f"dp_size * rollout.n."
-                )
-
-            global_partition_lst = get_group_balanced_partitions(
-                seqlen_list=seqlen_list,
-                uid_list=uid_list,
-                k_partitions=dp_size,
-            )
-
-        elif keep_minibatch:
-            # Decouple the DP balancing and mini-batching.
-            minibatch_size = self.config.actor_rollout_ref.actor.get("ppo_mini_batch_size")
-            minibatch_num = len(workload_lst) // minibatch_size
-            global_partition_lst = [[] for _ in range(dp_size)]
-            for i in range(minibatch_num):
-                rearrange_minibatch_lst = get_seqlen_balanced_partitions(
-                    workload_lst[i * minibatch_size : (i + 1) * minibatch_size],
-                    k_partitions=dp_size,
-                    equal_size=True,
-                )
-                for j, part in enumerate(rearrange_minibatch_lst):
-                    global_partition_lst[j].extend([x + minibatch_size * i for x in part])
-        else:
-            global_partition_lst = get_seqlen_balanced_partitions(workload_lst, k_partitions=dp_size, equal_size=True)
-        # Place smaller micro-batches at both ends to reduce the bubbles in pipeline parallel.
-        # Skip reordering within partitions for PrefixGrouper to maintain uid grouping
-        if not getattr(self, "use_prefix_grouper", False):
-            for idx, partition in enumerate(global_partition_lst):
-                partition.sort(key=lambda x: (workload_lst[x], x))
-                ordered_partition = partition[::2] + partition[1::2][::-1]
-                global_partition_lst[idx] = ordered_partition
-
-        # reorder based on index. The data will be automatically equally partitioned by dispatch function
-        global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
-        batch.reorder(global_idx)
-        global_balance_stats = log_seqlen_unbalance(
-            seqlen_list=global_seqlen_lst.tolist(), partitions=global_partition_lst, prefix=logging_prefix
-        )
-        metrics.update(global_balance_stats)
-
-    def _compute_values(self, batch: DataProto) -> DataProto:
-        if self.use_legacy_worker_impl == "disable":
-            batch_td = batch.to_tensordict()
-            # step 2: convert from padding to nopadding
-            batch_td = embeds_padding_2_no_padding(batch_td)
-            # step 3: add meta info
-            tu.assign_non_tensor(batch_td, compute_loss=False)
-            output = self.critic_wg.infer_batch(batch_td)
-            output = output.get()
-            values = tu.get(output, "values")
-            values = tu.get_tensordict({"values": values.float()})
-            values = DataProto.from_tensordict(values)
-        else:
-            values = self.critic_wg.compute_values(batch)
-        return values
 
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
-        if self.use_legacy_worker_impl == "disable":
-            # step 1: convert dataproto to tensordict.
-            batch_td = batch.to_tensordict()
-            # step 2: convert from padding to nopadding
-            batch_td = embeds_padding_2_no_padding(batch_td)
-            # step 3: add meta info
-            metadata = {
-                "compute_loss": False,
-                "height": self.config.actor_rollout_ref.model.image_height,
-                "width": self.config.actor_rollout_ref.model.image_width,
-                "vae_scale_factor": self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
-            }
-            if self.ref_in_actor:
-                metadata["no_lora_adapter"] = True
-            tu.assign_non_tensor(batch_td, **metadata)
-            if self.ref_in_actor:
-                output = self.actor_rollout_wg.compute_log_prob(batch_td)
-            else:
-                output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
-            # gather output
-            log_probs = tu.get(output, "log_probs")
-            prev_sample_mean = tu.get(output, "prev_sample_mean")
-            # step 5: rebuild a tensordict and convert to dataproto
-            ref_log_prob = tu.get_tensordict(
-                {"ref_log_prob": log_probs.float(), "ref_prev_sample_mean": prev_sample_mean.float()}
-            )
-            ref_log_prob = DataProto.from_tensordict(ref_log_prob)
+        batch_td = batch.to_tensordict()
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        metadata = {
+            "compute_loss": False,
+            "height": self.config.actor_rollout_ref.model.image_height,
+            "width": self.config.actor_rollout_ref.model.image_width,
+            "vae_scale_factor": self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        }
+        if self.ref_in_actor:
+            metadata["no_lora_adapter"] = True
+        tu.assign_non_tensor(batch_td, **metadata)
+        if self.ref_in_actor:
+            output = self.actor_rollout_wg.compute_log_prob(batch_td)
         else:
-            ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
-
-        return ref_log_prob
+            output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
+        log_probs = tu.get(output, "log_probs")
+        prev_sample_mean = tu.get(output, "prev_sample_mean")
+        ref_log_prob = tu.get_tensordict(
+            {"ref_log_prob": log_probs.float(), "ref_prev_sample_mean": prev_sample_mean.float()}
+        )
+        return DataProto.from_tensordict(ref_log_prob)
 
     def _compute_old_log_prob(self, batch: DataProto):
-        if self.use_legacy_worker_impl == "disable":
-            # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
-            # step 1: convert dataproto to tensordict.
-            batch_td = batch.to_tensordict()
-            # step 2: convert from padding to nopadding
-            batch_td = embeds_padding_2_no_padding(batch_td)
-            # step 3: add meta info
-            tu.assign_non_tensor(
-                batch_td,
-                compute_loss=False,
-                height=self.config.actor_rollout_ref.model.image_height,
-                width=self.config.actor_rollout_ref.model.image_width,
-                vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
-            )
-            output = self.actor_rollout_wg.compute_log_prob(batch_td)
-            # gather output
-            log_probs = tu.get(output, "log_probs")
-            # step 5: rebuild a tensordict and convert to dataproto
-            old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float()})
-            old_log_prob = DataProto.from_tensordict(old_log_prob)
-        else:
-            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-        return old_log_prob
+        batch_td = batch.to_tensordict()
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        tu.assign_non_tensor(
+            batch_td,
+            compute_loss=False,
+            height=self.config.actor_rollout_ref.model.image_height,
+            width=self.config.actor_rollout_ref.model.image_width,
+            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        )
+        output = self.actor_rollout_wg.compute_log_prob(batch_td)
+        log_probs = tu.get(output, "log_probs")
+        old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float()})
+        return DataProto.from_tensordict(old_log_prob)
 
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
-        # update actor
-        if self.use_legacy_worker_impl == "disable":
-            batch_td = batch.to_tensordict()
-            # step 2: convert from padding to no-padding
-            batch_td = embeds_padding_2_no_padding(batch_td)
-            ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-            ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
-            ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
-            seed = self.config.actor_rollout_ref.actor.data_loader_seed
-            shuffle = self.config.actor_rollout_ref.actor.shuffle
-            tu.assign_non_tensor(
-                batch_td,
-                global_batch_size=ppo_mini_batch_size,
-                mini_batch_size=ppo_mini_batch_size,
-                epochs=ppo_epochs,
-                seed=seed,
-                dataloader_kwargs={"shuffle": shuffle},
-                height=self.config.actor_rollout_ref.model.image_height,
-                width=self.config.actor_rollout_ref.model.image_width,
-                vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
-            )
-
-            actor_output = self.actor_rollout_wg.update_actor(batch_td)
-            actor_output = tu.get(actor_output, "metrics")
-            actor_output = rename_dict(actor_output, "actor/")
-            actor_output = DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
-        else:
-            actor_output = self.actor_rollout_wg.update_actor(batch)
-
-        return actor_output
-
-    def _update_critic(self, batch: DataProto) -> DataProto:
-        if self.use_legacy_worker_impl == "disable":
-            batch_td = batch.to_tensordict()
-            # step 2: convert from padding to no-padding
-            batch_td = embeds_padding_2_no_padding(batch_td)
-            ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size
-            ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
-            ppo_epochs = self.config.critic.ppo_epochs
-            seed = self.config.critic.data_loader_seed
-            shuffle = self.config.critic.shuffle
-            tu.assign_non_tensor(
-                batch_td,
-                global_batch_size=ppo_mini_batch_size,
-                mini_batch_size=ppo_mini_batch_size,
-                epochs=ppo_epochs,
-                seed=seed,
-                dataloader_kwargs={"shuffle": shuffle},
-                height=self.config.actor_rollout_ref.model.image_height,
-                width=self.config.actor_rollout_ref.model.image_width,
-                vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
-            )
-
-            output = self.critic_wg.train_mini_batch(batch_td)
-            output = output.get()
-            output = tu.get(output, "metrics")
-            output = rename_dict(output, "critic/")
-            # modify key name
-            output["perf/mfu/critic"] = output.pop("critic/mfu")
-            critic_output = DataProto.from_single_dict(data={}, meta_info={"metrics": output})
-        else:
-            critic_output = self.critic_wg.update_critic(batch)
-        return critic_output
+        batch_td = batch.to_tensordict()
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
+        seed = self.config.actor_rollout_ref.actor.data_loader_seed
+        shuffle = self.config.actor_rollout_ref.actor.shuffle
+        tu.assign_non_tensor(
+            batch_td,
+            global_batch_size=ppo_mini_batch_size,
+            mini_batch_size=ppo_mini_batch_size,
+            epochs=ppo_epochs,
+            seed=seed,
+            dataloader_kwargs={"shuffle": shuffle},
+            height=self.config.actor_rollout_ref.model.image_height,
+            width=self.config.actor_rollout_ref.model.image_width,
+            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        )
+        actor_output = self.actor_rollout_wg.update_actor(batch_td)
+        actor_output = tu.get(actor_output, "metrics")
+        actor_output = rename_dict(actor_output, "actor/")
+        return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
     def fit(self):
         """
@@ -1258,24 +1016,6 @@ class RayFlowGRPOTrainer:
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
-                    if "response_mask" not in batch.batch.keys():
-                        batch.batch["response_mask"] = compute_response_mask(batch)
-                    # Balance the number of valid tokens across DP ranks.
-                    # NOTE: This usually changes the order of data in the `batch`,
-                    # which won't affect the advantage calculation (since it's based on uid),
-                    # but might affect the loss calculation (due to the change of mini-batching).
-                    if self.config.trainer.balance_batch:
-                        self._balance_batch(batch, metrics=metrics)
-
-                    # compute global_valid tokens
-                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-                    # get images_seqlens
-                    images_seqlens_all = []
-                    for multi_modal_input in batch.non_tensor_batch["multi_modal_inputs"]:
-                        if "image_grid_thw" not in multi_modal_input.keys():
-                            continue
-                        images_seqlens_all.extend(multi_modal_input["images_seqlens"].tolist())
-                    batch.meta_info["images_seqlens"] = images_seqlens_all
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
@@ -1311,16 +1051,10 @@ class RayFlowGRPOTrainer:
                             ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
 
-                    # compute values
-                    if self.use_critic:
-                        with marked_timer("values", timing_raw, color="cyan"):
-                            values = self._compute_values(batch)
-                            batch = batch.union(values)
-
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
-                        batch.batch["token_level_scores"] = reward_tensor
+                        batch.batch["sample_level_scores"] = reward_tensor
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
@@ -1332,7 +1066,7 @@ class RayFlowGRPOTrainer:
                             )
                             metrics.update(kl_metrics)
                         else:
-                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+                            batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
 
                         # Compute rollout correction: IS weights, rejection sampling, and metrics
                         # Only runs in decoupled mode (computes once per batch using stable π_old)
@@ -1362,47 +1096,38 @@ class RayFlowGRPOTrainer:
                             config=self.config.algorithm,
                         )
 
-                    # update critic
-                    if self.use_critic:
-                        with marked_timer("update_critic", timing_raw, color="pink"):
-                            critic_output = self._update_critic(batch)
-                        critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
-                        metrics.update(critic_output_metrics)
+                    # update actor
+                    with marked_timer("update_actor", timing_raw, color="red"):
+                        actor_output = self._update_actor(batch)
 
-                    # implement critic warmup
-                    if self.config.trainer.critic_warmup <= self.global_steps:
-                        # update actor
-                        with marked_timer("update_actor", timing_raw, color="red"):
-                            actor_output = self._update_actor(batch)
+                    # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
+                    esi_close_to_expiration = should_save_ckpt_esi(
+                        max_steps_duration=self.max_steps_duration,
+                        redundant_time=self.config.trainer.esi_redundant_time,
+                    )
+                    # Check if the conditions for saving a checkpoint are met.
+                    # The conditions include a mandatory condition (1) and
+                    # one of the following optional conditions (2/3/4):
+                    # 1. The save frequency is set to a positive value.
+                    # 2. It's the last training step.
+                    # 3. The current step number is a multiple of the save frequency.
+                    # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
+                    if self.config.trainer.save_freq > 0 and (
+                        is_last_step
+                        or self.global_steps % self.config.trainer.save_freq == 0
+                        or esi_close_to_expiration
+                    ):
+                        if esi_close_to_expiration:
+                            print("Force saving checkpoint: ESI instance expiration approaching.")
+                        with marked_timer("save_checkpoint", timing_raw, color="green"):
+                            self._save_checkpoint()
 
-                        # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
-                        esi_close_to_expiration = should_save_ckpt_esi(
-                            max_steps_duration=self.max_steps_duration,
-                            redundant_time=self.config.trainer.esi_redundant_time,
-                        )
-                        # Check if the conditions for saving a checkpoint are met.
-                        # The conditions include a mandatory condition (1) and
-                        # one of the following optional conditions (2/3/4):
-                        # 1. The save frequency is set to a positive value.
-                        # 2. It's the last training step.
-                        # 3. The current step number is a multiple of the save frequency.
-                        # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
-                        if self.config.trainer.save_freq > 0 and (
-                            is_last_step
-                            or self.global_steps % self.config.trainer.save_freq == 0
-                            or esi_close_to_expiration
-                        ):
-                            if esi_close_to_expiration:
-                                print("Force saving checkpoint: ESI instance expiration approaching.")
-                            with marked_timer("save_checkpoint", timing_raw, color="green"):
-                                self._save_checkpoint()
+                    # update weights from trainer to rollout
+                    with marked_timer("update_weights", timing_raw, color="red"):
+                        self.checkpoint_manager.update_weights(self.global_steps)
 
-                        # update weights from trainer to rollout
-                        with marked_timer("update_weights", timing_raw, color="red"):
-                            self.checkpoint_manager.update_weights(self.global_steps)
-
-                        actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-                        metrics.update(actor_output_metrics)
+                    actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                    metrics.update(actor_output_metrics)
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
@@ -1444,11 +1169,10 @@ class RayFlowGRPOTrainer:
                     }
                 )
                 # collect metrics
-                metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
-                metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
-                # TODO: implement actual tflpo and theoretical tflpo
+                metrics.update(compute_data_metrics_diffusion(batch=batch))
+                metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw))
                 n_gpus = self.resource_pool_manager.get_n_gpus()
-                metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
+                metrics.update(compute_throughout_metrics_diffusion(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
                 # compute variance proxy metrics
                 gradient_norm = metrics.get("actor/grad_norm", None)
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
