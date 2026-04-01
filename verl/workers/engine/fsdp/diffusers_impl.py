@@ -624,7 +624,7 @@ class DiffusersFSDPEngine(BaseEngine):
         height = tu.get_non_tensor_data(data=micro_batch, key="height", default=None)
         width = tu.get_non_tensor_data(data=micro_batch, key="width", default=None)
         vae_scale_factor = tu.get_non_tensor_data(data=micro_batch, key="vae_scale_factor", default=None)
-        img_shapes = [[(1, height // vae_scale_factor // 2, width // vae_scale_factor // 2)]]
+        img_shapes = [[(1, height // vae_scale_factor // 2, width // vae_scale_factor // 2)]] * latents.size(0)
 
         if getattr(self.module.config, "guidance_embeds", False):
             guidance = torch.full([1], self._guidance_scale, dtype=torch.float32)
