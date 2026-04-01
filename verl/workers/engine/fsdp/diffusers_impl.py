@@ -688,7 +688,7 @@ class DiffusersFSDPEngine(BaseEngine):
 
         _, log_prob, prev_sample_mean, std_dev_t = self.scheduler.sample_previous_step(
             sample=latents[:, step].float(),
-            model_output=noise_pred,
+            model_output=noise_pred.float(),
             timestep=timesteps[:, step],
             noise_level=self.model_config.noise_level,
             prev_sample=latents[:, step + 1].float(),
