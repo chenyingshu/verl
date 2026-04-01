@@ -645,9 +645,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if self.config.rollout.checkpoint_engine.backend != "naive":
-            per_tensor_param, _ = self.actor.engine.get_per_tensor_param(layered_summon=True, base_sync_done=True)
+            per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param()
             await self.checkpoint_engine.send_weights(per_tensor_param)
-            return
+            base_sync_done = "dummy" not in self.config.rollout.load_format  # TODO: (susan) not sure
+            return peft_config, base_sync_done
 
         set_expandable_segments(False)
         log_gpu_memory_usage("Before resume weights", logger=logger)
@@ -696,6 +697,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         self.base_sync_done = True
         set_expandable_segments(True)
+
+        return peft_config, self.base_sync_done
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):

@@ -283,9 +283,9 @@ class CheckpointEngineWorker(Worker):
         initialize_global_process_group_ray(timeout_second=None, backend="cpu:gloo")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    async def update_weights(self, global_steps: int = None):
+    async def update_weights(self, global_steps: int = None, **kwargs):
         weights = self.checkpoint_engine.receive_weights()
-        await self.server_adapter.update_weights(weights, global_steps=global_steps)
+        await self.server_adapter.update_weights(weights, global_steps=global_steps, **kwargs)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
@@ -425,7 +425,8 @@ class CheckpointEngineManager:
         self.build_process_group(rollout)
 
         # 4. update weights of all workers
-        ray.get(trainer.update_weights(global_steps=global_steps) + rollout.update_weights(global_steps=global_steps))
+        out = ray.get(trainer.update_weights(global_steps=global_steps))
+        ray.get(rollout.update_weights(global_steps=global_steps, peft_config=out[0][0], base_sync_done=out[0][1]))
 
         # 5. finalize all workers
         ray.get(

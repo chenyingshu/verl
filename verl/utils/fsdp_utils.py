@@ -642,7 +642,9 @@ def collect_lora_params(
             lora_params = layered_summon_lora_params(module, is_diffusers=is_diffusers)
         else:
             with FSDP.summon_full_params(module, writeback=False):
-                if base_sync_done:
+                if is_diffusers:  # TODO: (susan) not sure, may change later
+                    lora_params = layered_summon_lora_params(module, is_diffusers=is_diffusers)
+                elif base_sync_done:
                     lora_params = get_peft_model_state_dict(peft_model)
                     lora_params = {
                         name: param.full_tensor().detach().cpu()

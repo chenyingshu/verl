@@ -24,7 +24,6 @@ from pprint import pprint
 from typing import Optional
 
 import numpy as np
-import ray
 import torch
 from omegaconf import OmegaConf
 from torch.utils.data import Dataset, Sampler
@@ -38,7 +37,6 @@ from verl.trainer.ppo.ray_diffusion_trainer import (
     ResourcePoolManager,
     compute_response_mask,
 )
-from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.debug import marked_timer
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -227,12 +225,6 @@ class OneStepOffRayFlowGRPOTrainer(SeparateRayFlowGRPOTrainer):
 
         # Return the original, now-modified `batch` and the `future_reward`
         return metrics, timing_raw, epoch, batch, future_reward
-
-    @staticmethod
-    @ray.remote
-    def _launch_individual_rewards(batch, config, tokenizer):
-        reward_tensor, reward_extra_info = extract_reward(batch)
-        return reward_tensor, reward_extra_info
 
     async def fit(self):
         """
