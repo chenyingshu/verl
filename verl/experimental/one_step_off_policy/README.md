@@ -261,6 +261,7 @@ python3 -m verl.experimental.one_step_off_policy.main_ppo \
     --config-path=config \
     --config-name='one_step_off_ppo_diffusion_trainer.yaml' \
     algorithm.adv_estimator=flow_grpo \
+    actor_rollout_ref.rollout.checkpoint_engine.backend=nccl \
     actor_rollout_ref.actor.strategy=fsdp2 \
     # actor and rollout are placed separately
     actor_rollout_ref.hybrid_engine=False \
